@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "DirectLink - Zero-Click Resource Ingestion Engine",
+  "version": "1.0.0",
+  "description": "Record-and-Generalize extension to reverse-engineer ad-gate loops and provide instant 1-click downloads.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "webRequest",
+    "declarativeNetRequest"
+  ],
+  "optional_permissions": [
+    "debugger"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content_script.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "DirectLink Engine"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "API Contract Inference & Gatekeeper Engine",
+  "description": "Technical documentation and interactive workbench for Few-Shot Demonstration Learning, API contract inference, network trace correlation, and gatekeeper bypass architecture.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

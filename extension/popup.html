@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DirectLink Ingestion Engine</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="header">
+    <div class="brand">
+      <div class="icon-badge">⚡</div>
+      <div class="brand-text">
+        <div class="brand-title">DirectLink Engine</div>
+        <div class="brand-subtitle">Record & Auto-Bypass</div>
+      </div>
+    </div>
+    <div id="status-pill" class="status-pill idle">Ready</div>
+  </div>
+
+  <div class="main-content">
+    <!-- Active Domain Info -->
+    <div class="domain-card">
+      <span class="label">Current Tab:</span>
+      <span id="current-tab-domain" class="domain-name">Loading...</span>
+    </div>
+
+    <!-- 2-Tag Workflow Buttons -->
+    <div class="action-buttons">
+      <button id="btn-tag-source" class="btn btn-primary">
+        <span class="btn-icon">📍</span>
+        <div class="btn-text">
+          <span class="btn-title">1. Tag Page as Source</span>
+          <span class="btn-desc">Record DOM snapshot & start ad trip</span>
+        </div>
+      </button>
+
+      <button id="btn-tag-target" class="btn btn-success" disabled>
+        <span class="btn-icon">🎯</span>
+        <div class="btn-text">
+          <span class="btn-title">2. Tag Target Download Link</span>
+          <span class="btn-desc">Infer relationship & save domain recipe</span>
+        </div>
+      </button>
+    </div>
+
+    <!-- Active Recording Banner -->
+    <div id="recording-banner" class="recording-banner hidden">
+      <div class="pulse-dot"></div>
+      <div class="banner-text">
+        <strong id="recording-source-label">Recording Active:</strong>
+        <span>Navigate through ad pages now. When you reach the final download page, open extension & click Button 2!</span>
+      </div>
+      <button id="btn-cancel-recording" class="btn-mini-cancel">Cancel</button>
+    </div>
+
+    <!-- Stored Domain Recipes -->
+    <div class="recipes-section">
+      <div class="section-title-row">
+        <span class="section-title">Saved Domain Recipes</span>
+        <span id="recipe-count" class="badge">0</span>
+      </div>
+
+      <div id="recipes-list" class="recipes-list">
+        <div class="empty-state">No domain recipes saved yet. Tag a source page above to create one.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span>DirectLink v1.0 • Manifest V3</span>
+  </div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
