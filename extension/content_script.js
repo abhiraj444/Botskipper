@@ -10,10 +10,12 @@
 
 (async function () {
   const currentDomain = window.location.hostname;
+  const bareDomain = currentDomain.replace(/^www\./, '');
+  const wwwDomain = `www.${bareDomain}`;
 
-  // Check if an active recipe exists for this domain
-  chrome.storage.local.get([`recipe_${currentDomain}`], (res) => {
-    const recipe = res[`recipe_${currentDomain}`];
+  // Check if an active recipe exists for this domain (checking bare and www forms)
+  chrome.storage.local.get([`recipe_${currentDomain}`, `recipe_${bareDomain}`, `recipe_${wwwDomain}`], (res) => {
+    const recipe = res[`recipe_${currentDomain}`] || res[`recipe_${bareDomain}`] || res[`recipe_${wwwDomain}`];
     if (recipe) {
       console.log(`[DirectLink Engine] Active recipe found for ${currentDomain} (${recipe.strategy})`);
       injectDirectBypassUI(recipe);
@@ -43,7 +45,7 @@
   });
 
   /**
-   * Capture deep DOM entities including download button attributes
+   * Capture deep DOM entities including all scripts, text, and download button attributes
    */
   function captureCurrentDomSnapshot() {
     // 1. Meta tags
@@ -64,16 +66,19 @@
       }
     });
 
-    // 3. Download Button Specific Dataset (crucial when website calls backend API from button metadata!)
+    // 3. Download Button Specific Dataset & Anchors (including ad shorteners like shrinkme)
     const buttonDataset = {};
-    const downloadBtns = document.querySelectorAll('#btn-download, #download-button, .download-btn, .btn-download, a[href*="download"], [data-action="download"], button[data-id], button[data-file]');
+    const downloadBtns = findDownloadCandidates();
     downloadBtns.forEach(btn => {
       for (const [k, v] of Object.entries(btn.dataset)) {
         buttonDataset[k] = v;
       }
-      if (btn.getAttribute('href') && !btn.getAttribute('href').startsWith('#') && !btn.getAttribute('href').startsWith('javascript:')) {
-        buttonDataset['button_href'] = btn.getAttribute('href');
+      const href = btn.getAttribute('href');
+      if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+        buttonDataset['button_href'] = href;
       }
+      if (btn.id) buttonDataset['button_id'] = btn.id;
+      if (btn.className) buttonDataset['button_class'] = btn.className;
     });
 
     // 4. Next.js SSR Hydration AST
@@ -85,7 +90,15 @@
       } catch (e) {}
     }
 
-    // 5. URL slug tokens
+    // 5. Inlined scripts texts (for finding embedded IDs, hashes, tokens)
+    const allScripts = [];
+    document.querySelectorAll('script:not([src])').forEach(s => {
+      if (s.textContent && s.textContent.length < 50000) {
+        allScripts.push(s.textContent);
+      }
+    });
+
+    // 6. URL slug tokens
     const pathParts = window.location.pathname.split('/').filter(Boolean);
 
     return {
@@ -95,19 +108,62 @@
       dataAttributes,
       buttonDataset,
       nextData,
+      allScripts: allScripts.slice(0, 15),
       urlTokens: pathParts
     };
   }
 
   /**
-   * Inject 1-Click Instant Bypass Button into the webpage
+   * Intelligently find download buttons, links, or ad shortener anchors on the page
+   */
+  function findDownloadCandidates() {
+    const candidates = [];
+    const elements = document.querySelectorAll('a, button, [role="button"], input[type="button"], input[type="submit"]');
+
+    const downloadRegex = /(?:download|get\s*file|get\s*pdf|download\s*pdf|pdf\s*download|direct\s*download|click\s*here\s*to\s*download|free\s*download)/i;
+    const adShortenerRegex = /(?:shrinkme|themezon|mrproblogger|gplinks|droplink|linkvertise|ouo\.io|shorturl|bit\.ly|tinyurl)/i;
+
+    elements.forEach(el => {
+      if (el.hasAttribute('data-directlink')) return; // Skip our own button
+
+      const text = (el.textContent || el.innerText || '').trim();
+      const href = el.getAttribute('href') || '';
+      const id = el.id || '';
+      const cls = el.className || '';
+      const title = el.getAttribute('title') || '';
+      const aria = el.getAttribute('aria-label') || '';
+
+      const isTextMatch = downloadRegex.test(text) || downloadRegex.test(title) || downloadRegex.test(aria);
+      const isHrefMatch = href.includes('download') || adShortenerRegex.test(href);
+      const isClassOrIdMatch = id.toLowerCase().includes('download') || (typeof cls === 'string' && cls.toLowerCase().includes('download'));
+
+      if (isTextMatch || isHrefMatch || isClassOrIdMatch) {
+        candidates.push(el);
+      }
+    });
+
+    return candidates;
+  }
+
+  /**
+   * Inject 1-Click Instant Bypass Button & Floating Action Bar
    */
   function injectDirectBypassUI(recipe) {
-    const targetElements = document.querySelectorAll(
-      '#btn-download, #download-button, .download-btn, .btn-download, a[href*="download"], [data-action="download"], button:not([data-directlink])'
-    );
+    // 1. Inject inline buttons next to existing download links
+    injectInlineButtons(recipe);
 
-    if (targetElements.length === 0) return;
+    // 2. Always inject persistent floating action bar (guarantees access even if DOM buttons are hidden)
+    injectFloatingActionBar(recipe);
+
+    // 3. Setup MutationObserver for dynamic SPAs (Next.js, Vue, dynamic pagination)
+    const observer = new MutationObserver(() => {
+      injectInlineButtons(recipe);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  function injectInlineButtons(recipe) {
+    const targetElements = findDownloadCandidates();
 
     targetElements.forEach(originalEl => {
       if (originalEl.getAttribute('data-directlink-processed')) return;
@@ -147,34 +203,109 @@
       fastBtn.onclick = async (e) => {
         e.preventDefault();
         e.stopPropagation();
-
-        fastBtn.innerHTML = '⏳ Bypassing Ads & Minting Direct Stream...';
-        fastBtn.style.opacity = '0.7';
-
-        try {
-          if (recipe.strategy === 'BACKEND_API_MINTER') {
-            await executeBackendApiMinting(recipe, originalEl, fastBtn);
-          } else if (recipe.strategy === 'MULTI_STEP_CHAIN') {
-            await executeMultiStepChain(recipe, originalEl, fastBtn);
-          } else {
-            await executeDirectUrlTemplate(recipe, originalEl, fastBtn);
-          }
-        } catch (err) {
-          console.error('[DirectLink Engine] Execution error:', err);
-          fastBtn.innerHTML = '⚠️ Bypass Failed - Click for Manual';
-          fastBtn.style.background = '#dc2626';
-          setTimeout(() => {
-            fastBtn.innerHTML = '⚡ Instant Direct Download';
-            fastBtn.style.background = 'linear-gradient(135deg, #059669 0%, #0d9488 100%)';
-            fastBtn.style.opacity = '1';
-          }, 3500);
-        }
+        handleBypassClick(recipe, originalEl, fastBtn);
       };
 
       if (originalEl.parentNode) {
         originalEl.parentNode.insertBefore(fastBtn, originalEl.nextSibling);
       }
     });
+  }
+
+  /**
+   * Floating Action Bar guaranteeing 1-click bypass visibility anywhere on the page
+   */
+  function injectFloatingActionBar(recipe) {
+    if (document.getElementById('directlink-floating-bar')) return;
+
+    const bar = document.createElement('div');
+    bar.id = 'directlink-floating-bar';
+    bar.style.cssText = `
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 2147483647;
+      background: #0f172a;
+      color: #f8fafc;
+      padding: 12px 18px;
+      border-radius: 12px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 13px;
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      backdrop-filter: blur(8px);
+      animation: directlinkFadeIn 0.3s ease-out;
+    `;
+
+    bar.innerHTML = `
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="font-size: 16px;">⚡</span>
+        <div>
+          <div style="font-weight: 700; color: #34d399;">DirectLink Bypass Active</div>
+          <div style="font-size: 11px; opacity: 0.7;">Zero-click direct download ready</div>
+        </div>
+      </div>
+      <button id="directlink-floating-trigger" style="
+        background: linear-gradient(135deg, #059669 0%, #0d9488 100%);
+        color: #ffffff;
+        border: none;
+        padding: 8px 16px;
+        border-radius: 8px;
+        font-weight: 700;
+        cursor: pointer;
+        font-size: 12px;
+        box-shadow: 0 2px 8px rgba(5, 150, 105, 0.4);
+        transition: transform 0.15s ease;
+      ">⚡ Download Direct</button>
+      <button id="directlink-floating-close" style="
+        background: transparent;
+        border: none;
+        color: #94a3b8;
+        cursor: pointer;
+        font-size: 16px;
+        padding: 2px 6px;
+      ">✕</button>
+    `;
+
+    document.body.appendChild(bar);
+
+    const triggerBtn = document.getElementById('directlink-floating-trigger');
+    triggerBtn.onclick = () => {
+      const candidates = findDownloadCandidates();
+      handleBypassClick(recipe, candidates[0] || null, triggerBtn);
+    };
+
+    document.getElementById('directlink-floating-close').onclick = () => {
+      bar.remove();
+    };
+  }
+
+  async function handleBypassClick(recipe, originalEl, triggerBtn) {
+    const originalHtml = triggerBtn.innerHTML;
+    triggerBtn.innerHTML = '⏳ Bypassing Ads & Minting Direct Stream...';
+    triggerBtn.style.opacity = '0.8';
+
+    try {
+      if (recipe.strategy === 'BACKEND_API_MINTER') {
+        await executeBackendApiMinting(recipe, originalEl, triggerBtn);
+      } else if (recipe.strategy === 'MULTI_STEP_CHAIN') {
+        await executeMultiStepChain(recipe, originalEl, triggerBtn);
+      } else {
+        await executeDirectUrlTemplate(recipe, originalEl, triggerBtn);
+      }
+    } catch (err) {
+      console.error('[DirectLink Engine] Execution error:', err);
+      triggerBtn.innerHTML = '⚠️ Bypass Failed - Click for Manual';
+      triggerBtn.style.background = '#dc2626';
+      setTimeout(() => {
+        triggerBtn.innerHTML = originalHtml;
+        triggerBtn.style.background = 'linear-gradient(135deg, #059669 0%, #0d9488 100%)';
+        triggerBtn.style.opacity = '1';
+      }, 4000);
+    }
   }
 
   /**
@@ -185,7 +316,37 @@
     const queryParams = new URLSearchParams();
     const bodyPayload = {};
 
-    // 1. Evaluate query bindings
+    let endpointStr = recipe.endpointTemplate;
+
+    // 1. Substitute Path Parameters (e.g. /api/v1/books/dl/{resourceId})
+    if (recipe.pathBindings && Array.isArray(recipe.pathBindings)) {
+      for (const pb of recipe.pathBindings) {
+        let val = extractValueFromBinding(pb, originalEl);
+        if (!val) {
+          // Dynamic hex/resource ID fallback on current page
+          val = findDynamicResourceIdOnPage(pb.idLength || 16, pb.tokenExample);
+        }
+        if (val) {
+          endpointStr = endpointStr.replace(`{${pb.paramName}}`, val);
+        }
+      }
+    }
+
+    // Fallback: If endpoint still has {placeholder} or if it has a hardcoded ID from previous session
+    if (endpointStr.includes('{')) {
+      const pageId = findDynamicResourceIdOnPage(16);
+      if (pageId) {
+        endpointStr = endpointStr.replace(/\{[^}]+\}/g, pageId);
+      }
+    } else if (/\/books\/dl\/[a-f0-9]{12,64}/i.test(endpointStr)) {
+      // Auto-generalize if endpoint was saved with a specific book ID from recording session
+      const pageId = findDynamicResourceIdOnPage(16);
+      if (pageId) {
+        endpointStr = endpointStr.replace(/\/books\/dl\/[a-f0-9]{12,64}/i, `/books/dl/${pageId}`);
+      }
+    }
+
+    // 2. Evaluate query bindings
     if (recipe.queryBindings && Array.isArray(recipe.queryBindings)) {
       for (const b of recipe.queryBindings) {
         const val = extractValueFromBinding(b, originalEl);
@@ -193,7 +354,7 @@
       }
     }
 
-    // 2. Evaluate body bindings for POST
+    // 3. Evaluate body bindings for POST
     if (recipe.bodyBindings && Array.isArray(recipe.bodyBindings)) {
       for (const b of recipe.bodyBindings) {
         const val = extractValueFromBinding(b, originalEl);
@@ -201,10 +362,10 @@
       }
     }
 
-    const apiUrl = new URL(recipe.endpointTemplate);
+    const apiUrl = new URL(endpointStr);
     queryParams.forEach((v, k) => apiUrl.searchParams.set(k, v));
 
-    console.log(`[DirectLink Engine] Calling Minting API: ${recipe.httpMethod} ${apiUrl.toString()}`);
+    console.log(`[DirectLink Engine] Calling Minting API: ${recipe.httpMethod || 'GET'} ${apiUrl.toString()}`);
 
     const fetchOptions = {
       method: recipe.httpMethod || 'GET',
@@ -221,39 +382,112 @@
     }
 
     const res = await fetch(apiUrl.toString(), fetchOptions);
-    const contentType = res.headers.get('content-type') || '';
 
     let directDownloadUrl = null;
 
-    if (contentType.includes('application/json')) {
-      const data = await res.json();
-      console.log('[DirectLink Engine] Received API Minting Response:', data);
-
-      // Search response extractors
-      for (const key of (recipe.responseExtractors || ['download_url', 'url', 'cdn_url', 'link'])) {
-        const val = getNestedProp(data, key);
-        if (val && typeof val === 'string' && val.startsWith('http')) {
-          directDownloadUrl = val;
-          break;
-        }
-      }
-
-      // If no standard key matched, recursive search for http URL
-      if (!directDownloadUrl) {
-        directDownloadUrl = findFirstHttpUrl(data);
-      }
+    if (res.redirected && res.url) {
+      directDownloadUrl = res.url;
     } else {
-      // Direct binary stream or redirect response
-      directDownloadUrl = apiUrl.toString();
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        console.log('[DirectLink Engine] Received API Minting Response:', data);
+
+        // Search response extractors
+        for (const key of (recipe.responseExtractors || ['download_url', 'url', 'cdn_url', 'link', 'data.download_url'])) {
+          const val = getNestedProp(data, key);
+          if (val && typeof val === 'string' && val.startsWith('http')) {
+            directDownloadUrl = val;
+            break;
+          }
+        }
+
+        // If no standard key matched, recursive search for http URL
+        if (!directDownloadUrl) {
+          directDownloadUrl = findFirstHttpUrl(data);
+        }
+      } else {
+        // Direct binary stream
+        directDownloadUrl = apiUrl.toString();
+      }
     }
 
     if (directDownloadUrl) {
       fastBtn.innerHTML = '✓ Download Triggered!';
       fastBtn.style.opacity = '1';
-      window.location.href = directDownloadUrl;
+      triggerBrowserDownload(directDownloadUrl);
     } else {
       throw new Error('Could not extract download URL from API response');
     }
+  }
+
+  function triggerBrowserDownload(url) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => a.remove(), 1000);
+  }
+
+  /**
+   * Searches the current page for dynamic hex/alphanumeric IDs (e.g. Next.js data, script tags, DOM attributes)
+   */
+  function findDynamicResourceIdOnPage(expectedLength = 16, excludeToken = '') {
+    // 1. Next.js state
+    const nextScript = document.getElementById('__NEXT_DATA__');
+    if (nextScript) {
+      try {
+        const parsed = JSON.parse(nextScript.textContent);
+        const candidate = findIdInObject(parsed, expectedLength);
+        if (candidate && candidate !== excludeToken) return candidate;
+      } catch (e) {}
+    }
+
+    // 2. Scripts inspection
+    const scripts = document.querySelectorAll('script:not([src])');
+    for (const s of scripts) {
+      const text = s.textContent || '';
+      const regex = new RegExp(`(?:"(?:_id|id|book_id|file_id)"|id)\\s*:\\s*["']([a-f0-9]{${expectedLength - 4},${expectedLength + 4}})["']`, 'i');
+      const match = text.match(regex);
+      if (match && match[1] && match[1] !== excludeToken) {
+        return match[1];
+      }
+    }
+
+    // 3. DOM attributes
+    const elementsWithData = document.querySelectorAll('[data-id], [data-book-id], [data-file], [data-slug]');
+    for (const el of elementsWithData) {
+      for (const val of Object.values(el.dataset)) {
+        if (val && typeof val === 'string' && val.length >= 8 && val !== excludeToken) {
+          return val;
+        }
+      }
+    }
+
+    // 4. Raw HTML 16-hex match
+    const bodyHtml = document.body.innerHTML;
+    const hexMatch = bodyHtml.match(/\b([a-f0-9]{16})\b/i);
+    if (hexMatch && hexMatch[1] && hexMatch[1] !== excludeToken) {
+      return hexMatch[1];
+    }
+
+    return null;
+  }
+
+  function findIdInObject(obj, targetLength) {
+    if (!obj || typeof obj !== 'object') return null;
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === 'string' && (/^[a-f0-9]+$/i.test(v) || /id/i.test(k))) {
+        if (Math.abs(v.length - targetLength) <= 4) return v;
+      }
+      if (typeof v === 'object') {
+        const found = findIdInObject(v, targetLength);
+        if (found) return found;
+      }
+    }
+    return null;
   }
 
   /**
@@ -305,10 +539,10 @@
       console.log('[DirectLink Engine] Terminal link resolved from Bridge Page:', terminalLink);
       fastBtn.innerHTML = '✓ Download Triggered!';
       fastBtn.style.opacity = '1';
-      window.location.href = terminalLink;
+      triggerBrowserDownload(terminalLink);
     } else {
       // Fallback: direct navigation to broker if bridge parsing failed
-      window.location.href = brokerUrl.toString();
+      triggerBrowserDownload(brokerUrl.toString());
     }
   }
 
@@ -330,7 +564,7 @@
 
     fastBtn.innerHTML = '✓ Download Triggered!';
     fastBtn.style.opacity = '1';
-    window.location.href = targetUrl.toString();
+    triggerBrowserDownload(targetUrl.toString());
   }
 
   /**

@@ -90,38 +90,77 @@ export class RelationshipSolver {
   static synthesizeApiMinterRecipe(sourceDom, apiHop, finalDownloadUrl) {
     const apiObj = new URL(apiHop.url);
     const sourceHostname = new URL(sourceDom.url).hostname;
-    const isInternalBackend = apiObj.hostname === sourceHostname;
+    const isInternalBackend = this.isSameApexDomain(apiObj.hostname, sourceHostname);
 
-    // Bind parameters from Source DOM into API request
+    // 1. Bind query parameters from API request
     const apiParams = {};
     apiObj.searchParams.forEach((v, k) => { apiParams[k] = v; });
+    const queryBindings = this.resolveBindings(sourceDom, apiParams);
 
-    const bindings = this.resolveBindings(sourceDom, apiParams);
+    // 2. Bind path parameters (e.g., /api/v1/books/dl/:bookId)
+    const pathSegments = apiObj.pathname.split('/').filter(Boolean);
+    const pathBindings = [];
+    const templatedSegments = pathSegments.map((segment, index) => {
+      // Check if segment is dynamic (hex ID, UUID, numeric ID, or found in source DOM)
+      const isDynamic = /^[a-f0-9]{8,64}$/i.test(segment) ||
+                        /^[0-9]+$/.test(segment) ||
+                        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(segment);
 
-    // If POST request, also match body parameters
+      if (isDynamic) {
+        // Try to bind this dynamic token to the source DOM
+        const matchedBinding = this.findTokenInSourceDom(sourceDom, segment, `path_param_${index}`);
+        if (matchedBinding) {
+          pathBindings.push(matchedBinding);
+          return `{${matchedBinding.paramName}}`;
+        } else {
+          // If not directly found, record it as a resource ID template with regex fallback
+          const tokenName = 'resourceId';
+          pathBindings.push({
+            paramName: tokenName,
+            segmentIndex: index,
+            tokenExample: segment,
+            sourceType: 'inferred_resource_id',
+            idLength: segment.length,
+            isHex: /^[a-f0-9]+$/i.test(segment),
+            description: `Dynamic REST ID (${segment.length}-char ${/^[a-f0-9]+$/i.test(segment) ? 'hex' : 'token'}) in API path`
+          });
+          return `{${tokenName}}`;
+        }
+      }
+      return segment;
+    });
+
+    const templatedPathname = '/' + templatedSegments.join('/');
+
+    // 3. If POST request, also match body parameters
     let bodyBindings = [];
     if (apiHop.requestBody && typeof apiHop.requestBody === 'object') {
       bodyBindings = this.resolveBindings(sourceDom, apiHop.requestBody);
     }
 
+    // Normalized combined bindings array for compatibility
+    const allBindings = [...queryBindings, ...pathBindings, ...bodyBindings];
+
     return {
       domain: sourceHostname,
       strategy: 'BACKEND_API_MINTER',
       description: isInternalBackend
-        ? 'Website calls internal backend API with page/button metadata to mint direct download link'
+        ? 'Website calls internal backend API with resource identifier to mint direct download link'
         : 'Website calls external API service to generate authorized download token',
-      endpointTemplate: `${apiObj.origin}${apiObj.pathname}`,
+      endpointTemplate: `${apiObj.origin}${templatedPathname}`,
       httpMethod: apiHop.method || 'GET',
       isInternalBackend,
-      queryBindings: bindings,
-      bodyBindings: bodyBindings,
+      queryBindings,
+      pathBindings,
+      bodyBindings,
+      bindings: allBindings,
       headers: {
         'Accept': 'application/json, text/plain, */*',
         'Content-Type': 'application/json',
         'Referer': sourceDom.url
       },
       // Inferred response JSON field containing the final download link
-      responseExtractors: ['download_url', 'cdn_url', 'direct_url', 'file_url', 'url', 'link', 'data.download_url', 'data.url'],
+      responseExtractors: ['download_url', 'cdn_url', 'direct_url', 'file_url', 'url', 'link', 'data.download_url', 'data.url', 'data'],
       finalDownloadUrlExample: finalDownloadUrl,
       createdAt: new Date().toISOString()
     };
@@ -154,6 +193,7 @@ export class RelationshipSolver {
         candidateSelectors: ['#btn-download', '#download-button', '.btn-download', 'a[href*="download"]', 'a.btn-success'],
         terminalDomain: new URL(finalDownloadUrl).hostname
       },
+      bindings: step1Bindings,
       finalDownloadUrlExample: finalDownloadUrl,
       createdAt: new Date().toISOString()
     };
@@ -365,5 +405,115 @@ export class RelationshipSolver {
   static isAdTracker(url) {
     const adDomains = ['doubleclick', 'google-analytics', 'adnxs', 'popcash', 'propellerads', 'adsterra', 'exoclick', 'monetag', 'track', 'beacon', 'telemetry'];
     return adDomains.some(ad => url.toLowerCase().includes(ad));
+  }
+
+  /**
+   * Check if two hostnames share the same apex root domain
+   * e.g. api.allcompetitionclasses.com and www.allcompetitionclasses.com share allcompetitionclasses.com
+   */
+  static isSameApexDomain(hostA, hostB) {
+    if (!hostA || !hostB) return false;
+    if (hostA === hostB) return true;
+    const partsA = hostA.split('.').slice(-2).join('.');
+    const partsB = hostB.split('.').slice(-2).join('.');
+    return partsA === partsB;
+  }
+
+  /**
+   * Search for an arbitrary dynamic token (e.g. hex ID, book ID) in the source DOM snapshot
+   */
+  static findTokenInSourceDom(sourceDom, token, defaultParamName = 'id') {
+    if (!token || token.length < 3) return null;
+
+    // 1. Next.js state
+    if (sourceDom.nextData) {
+      const jsonPath = this.searchObject(sourceDom.nextData, token);
+      if (jsonPath) {
+        return {
+          paramName: defaultParamName,
+          tokenExample: token,
+          sourceType: 'next_data',
+          selector: `__NEXT_DATA__.${jsonPath}`,
+          attribute: jsonPath,
+          transform: 'json_prop',
+          confidence: 0.99,
+          description: `Extracted from Next.js Hydration: ${jsonPath}`
+        };
+      }
+    }
+
+    // 2. Button Dataset
+    if (sourceDom.buttonDataset) {
+      for (const [k, v] of Object.entries(sourceDom.buttonDataset)) {
+        if (v === token || (typeof v === 'string' && v.includes(token))) {
+          return {
+            paramName: defaultParamName,
+            tokenExample: token,
+            sourceType: 'button_data_attr',
+            selector: 'button, a',
+            attribute: `data-${k}`,
+            transform: 'identity',
+            confidence: 0.98,
+            description: `Extracted from button data-${k}`
+          };
+        }
+      }
+    }
+
+    // 3. DOM data attributes
+    if (sourceDom.dataAttributes) {
+      for (const [k, v] of Object.entries(sourceDom.dataAttributes)) {
+        if (v === token) {
+          return {
+            paramName: defaultParamName,
+            tokenExample: token,
+            sourceType: 'data_attr',
+            selector: `[data-${k}]`,
+            attribute: `data-${k}`,
+            transform: 'identity',
+            confidence: 0.95,
+            description: `Extracted from data-${k}`
+          };
+        }
+      }
+    }
+
+    // 4. Meta tags
+    if (sourceDom.metaTags) {
+      for (const [k, v] of Object.entries(sourceDom.metaTags)) {
+        if (v === token) {
+          return {
+            paramName: defaultParamName,
+            tokenExample: token,
+            sourceType: 'meta',
+            selector: `meta[name="${k}"]`,
+            attribute: 'content',
+            transform: 'identity',
+            confidence: 0.95,
+            description: `Extracted from <meta name="${k}">`
+          };
+        }
+      }
+    }
+
+    // 5. Inlined script tags
+    if (sourceDom.allScripts && Array.isArray(sourceDom.allScripts)) {
+      for (let i = 0; i < sourceDom.allScripts.length; i++) {
+        const scriptText = sourceDom.allScripts[i];
+        if (scriptText.includes(token)) {
+          return {
+            paramName: defaultParamName,
+            tokenExample: token,
+            sourceType: 'inline_script',
+            scriptIndex: i,
+            regex: `(?:"|_id|id|book_id)["':\\s]+(["']?${token}["']?)`,
+            confidence: 0.92,
+            description: `Extracted from inline script #${i}`
+          };
+        }
+      }
+    }
+
+    return null;
   }
 }

@@ -104,7 +104,9 @@ btnTagTarget.addEventListener('click', async () => {
     }, (res) => {
       btnTagTarget.querySelector('.btn-title').textContent = '2. Tag Target Download Link';
       if (res && res.status === 'success') {
-        alert(`🎉 Success! Direct bypass recipe generated for ${res.domain} with ${res.recipe.bindings.length} parameter bindings.`);
+        const bindingsCount = (res.recipe.bindings || res.recipe.queryBindings || []).length;
+        const strategyName = res.recipe.strategy || 'DIRECT_URL_TEMPLATE';
+        alert(`🎉 Success! Direct bypass recipe generated for ${res.domain}!\n\nStrategy: ${strategyName}\nDynamic Bindings: ${bindingsCount}`);
         setRecordingUI(false);
         loadSavedRecipes();
       } else {
@@ -138,10 +140,17 @@ function loadSavedRecipes() {
     recipes.forEach((recipe) => {
       const item = document.createElement('div');
       item.className = 'recipe-item';
+      const bindingsCount = (recipe.bindings || recipe.queryBindings || []).length;
+      const strategyLabel = recipe.strategy === 'BACKEND_API_MINTER'
+        ? 'Backend Minting API'
+        : recipe.strategy === 'MULTI_STEP_CHAIN'
+        ? 'Chained Broker'
+        : 'Direct URL';
+
       item.innerHTML = `
         <div class="recipe-info">
           <span class="recipe-domain">⚡ ${recipe.domain}</span>
-          <span class="recipe-rules">${recipe.bindings.length} dynamic bindings • ${recipe.isThirdPartyHub ? 'External Host' : 'Direct API'}</span>
+          <span class="recipe-rules">${strategyLabel} • ${bindingsCount} bindings</span>
         </div>
         <button class="btn-delete-recipe" data-domain="${recipe.domain}" title="Delete Recipe">✕</button>
       `;

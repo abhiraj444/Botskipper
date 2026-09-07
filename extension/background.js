@@ -75,10 +75,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       );
 
       const domain = new URL(currentSession.sourceUrl).hostname;
-      const storageKey = `recipe_${domain}`;
+      const bareDomain = domain.replace(/^www\./, '');
+      const storageKey1 = `recipe_${domain}`;
+      const storageKey2 = `recipe_${bareDomain}`;
 
-      // Save recipe to chrome.storage.local
-      chrome.storage.local.set({ [storageKey]: recipe }, () => {
+      // Save recipe to chrome.storage.local under both domain keys
+      chrome.storage.local.set({ [storageKey1]: recipe, [storageKey2]: recipe }, () => {
         console.log(`[DirectLink Engine] Synthesized and saved recipe (${recipe.strategy}) for ${domain}:`, recipe);
         sendResponse({ status: 'success', recipe, domain });
         currentSession = null; // Reset session
