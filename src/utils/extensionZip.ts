@@ -38,32 +38,189 @@ export const EXTENSION_FILES = {
 }`,
 
   'solver.js': `/**
- * DirectLink Relationship Solver Engine
- * Reverse-engineers the relationship between Source DOM entities and Target API endpoints.
+ * DirectLink Relationship Solver Engine (v2 - Multi-Step & Backend API Resolver)
+ * Reverse-engineers:
+ * 1. Direct URL Templates (static parameter alignment)
+ * 2. Backend Minting APIs (Internal / External APIs called with page/button metadata)
+ * 3. Chained Intermediate Brokers (Source -> Broker API -> Bridge Page -> Terminal Download)
  */
 
 export class RelationshipSolver {
-  static solve(sourceDom, targetUrl, targetBody = null) {
-    const bindings = [];
+  static solve(sourceDom, targetUrl, targetBody = null, networkHops = []) {
+    const mintingApiHop = this.findMintingApiHop(networkHops, targetUrl);
+
+    if (mintingApiHop) {
+      console.log('[RelationshipSolver] Detected Backend Minting API:', mintingApiHop.url);
+      return this.synthesizeApiMinterRecipe(sourceDom, mintingApiHop, targetUrl);
+    }
+
+    const brokerHop = this.findBrokerHop(networkHops, sourceDom);
+    if (brokerHop && brokerHop.url !== targetUrl) {
+      console.log('[RelationshipSolver] Detected Chained Broker Hop:', brokerHop.url);
+      return this.synthesizeChainedBrokerRecipe(sourceDom, brokerHop, targetUrl);
+    }
+
+    return this.synthesizeDirectUrlRecipe(sourceDom, targetUrl, targetBody);
+  }
+
+  static findMintingApiHop(networkHops, targetUrl) {
+    if (!networkHops || networkHops.length === 0) return null;
+    const apiKeywords = ['/api/', '/ajax/', 'mint', 'get-link', 'generate', 'download', 'resolve', 'ticket', 'token', 'file-stream'];
+    
+    for (let i = networkHops.length - 1; i >= 0; i--) {
+      const hop = networkHops[i];
+      if (!hop.url) continue;
+      if (this.isAdTracker(hop.url)) continue;
+
+      const isApi = apiKeywords.some(kw => hop.url.toLowerCase().includes(kw)) ||
+                    hop.type === 'xmlhttprequest' ||
+                    hop.type === 'fetch';
+
+      if (isApi) {
+        return hop;
+      }
+    }
+    return null;
+  }
+
+  static findBrokerHop(networkHops, sourceDom) {
+    if (!networkHops || networkHops.length === 0) return null;
+    const sourceHostname = new URL(sourceDom.url).hostname;
+
+    for (const hop of networkHops) {
+      if (!hop.url) continue;
+      if (this.isAdTracker(hop.url)) continue;
+
+      const hopHost = new URL(hop.url).hostname;
+      if (hopHost !== sourceHostname || hop.url.includes('/gateway') || hop.url.includes('/bridge') || hop.url.includes('/link/')) {
+        return hop;
+      }
+    }
+    return null;
+  }
+
+  static synthesizeApiMinterRecipe(sourceDom, apiHop, finalDownloadUrl) {
+    const apiObj = new URL(apiHop.url);
+    const sourceHostname = new URL(sourceDom.url).hostname;
+    const isInternalBackend = apiObj.hostname === sourceHostname;
+
+    const apiParams = {};
+    apiObj.searchParams.forEach((v, k) => { apiParams[k] = v; });
+    const bindings = this.resolveBindings(sourceDom, apiParams);
+
+    let bodyBindings = [];
+    if (apiHop.requestBody && typeof apiHop.requestBody === 'object') {
+      bodyBindings = this.resolveBindings(sourceDom, apiHop.requestBody);
+    }
+
+    return {
+      domain: sourceHostname,
+      strategy: 'BACKEND_API_MINTER',
+      description: isInternalBackend
+        ? 'Website calls internal backend API with page/button metadata to mint direct download link'
+        : 'Website calls external API service to generate authorized download token',
+      endpointTemplate: \`\${apiObj.origin}\${apiObj.pathname}\`,
+      httpMethod: apiHop.method || 'GET',
+      isInternalBackend,
+      queryBindings: bindings,
+      bodyBindings: bodyBindings,
+      headers: {
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/json',
+        'Referer': sourceDom.url
+      },
+      responseExtractors: ['download_url', 'cdn_url', 'direct_url', 'file_url', 'url', 'link', 'data.download_url', 'data.url'],
+      finalDownloadUrlExample: finalDownloadUrl,
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  static synthesizeChainedBrokerRecipe(sourceDom, brokerHop, finalDownloadUrl) {
+    const brokerObj = new URL(brokerHop.url);
+    const sourceHostname = new URL(sourceDom.url).hostname;
+
+    const brokerParams = {};
+    brokerObj.searchParams.forEach((v, k) => { brokerParams[k] = v; });
+    const step1Bindings = this.resolveBindings(sourceDom, brokerParams);
+
+    return {
+      domain: sourceHostname,
+      strategy: 'MULTI_STEP_CHAIN',
+      description: 'Multi-step resolution: Source DOM data is passed to an intermediate service/gateway which returns a bridge page containing the real download button.',
+      step1: {
+        type: 'BROKER_CALL',
+        endpoint: \`\${brokerObj.origin}\${brokerObj.pathname}\`,
+        method: brokerHop.method || 'GET',
+        bindings: step1Bindings
+      },
+      step2: {
+        type: 'TERMINAL_BRIDGE',
+        action: 'RESOLVE_TERMINAL_BUTTON',
+        candidateSelectors: ['#btn-download', '#download-button', '.btn-download', 'a[href*="download"]', 'a.btn-success'],
+        terminalDomain: new URL(finalDownloadUrl).hostname
+      },
+      finalDownloadUrlExample: finalDownloadUrl,
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  static synthesizeDirectUrlRecipe(sourceDom, targetUrl, targetBody) {
     const targetUrlObj = new URL(targetUrl);
     const targetParams = {};
-
-    targetUrlObj.searchParams.forEach((value, key) => {
-      targetParams[key] = value;
-    });
+    targetUrlObj.searchParams.forEach((value, key) => { targetParams[key] = value; });
 
     if (targetBody && typeof targetBody === 'object') {
-      Object.entries(targetBody).forEach(([key, val]) => {
-        targetParams[key] = String(val);
-      });
+      Object.entries(targetBody).forEach(([k, v]) => { targetParams[k] = String(v); });
     }
+
+    const bindings = this.resolveBindings(sourceDom, targetParams);
+    const isThirdPartyHub = this.isExternalHub(targetUrl);
+
+    return {
+      domain: new URL(sourceDom.url).hostname,
+      strategy: 'DIRECT_URL_TEMPLATE',
+      description: 'Direct parameter interpolation from source page metadata into final target download URL',
+      endpointTemplate: \`\${targetUrlObj.origin}\${targetUrlObj.pathname}\`,
+      isThirdPartyHub,
+      httpMethod: 'GET',
+      bindings,
+      headers: {
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': sourceDom.url
+      },
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  static resolveBindings(sourceDom, targetParams) {
+    const bindings = [];
 
     for (const [paramName, paramVal] of Object.entries(targetParams)) {
       if (!paramVal || paramVal.length < 2) continue;
-
       let matched = false;
 
-      // Strategy A: Direct Match in meta tags
+      // 1. Match in Download Button Dataset
+      if (sourceDom.buttonDataset) {
+        for (const [attrName, attrVal] of Object.entries(sourceDom.buttonDataset)) {
+          if (attrVal === paramVal) {
+            bindings.push({
+              paramName,
+              sourceType: 'button_data_attr',
+              selector: '#download-btn, [data-action="download"], .download-btn, a[href*="download"]',
+              attribute: \`data-\${attrName}\`,
+              transform: 'identity',
+              confidence: 0.99,
+              description: \`Extracted directly from original Download Button (data-\${attrName})\`
+            });
+            matched = true;
+            break;
+          }
+        }
+      }
+
+      if (matched) continue;
+
+      // 2. Match in meta tags
       if (sourceDom.metaTags) {
         for (const [metaName, metaContent] of Object.entries(sourceDom.metaTags)) {
           if (metaContent === paramVal) {
@@ -84,7 +241,7 @@ export class RelationshipSolver {
 
       if (matched) continue;
 
-      // Strategy B: Match in data-* attributes
+      // 3. Match in DOM data-* attributes
       if (sourceDom.dataAttributes) {
         for (const [attrName, attrVal] of Object.entries(sourceDom.dataAttributes)) {
           if (attrVal === paramVal) {
@@ -95,7 +252,7 @@ export class RelationshipSolver {
               attribute: \`data-\${attrName}\`,
               transform: 'identity',
               confidence: 0.95,
-              description: \`Extracted from DOM attribute data-\${attrName}\`
+              description: \`Extracted from page DOM attribute data-\${attrName}\`
             });
             matched = true;
             break;
@@ -105,20 +262,20 @@ export class RelationshipSolver {
 
       if (matched) continue;
 
-      // Strategy C: Inverse Base64 Decoding Match
+      // 4. Inverse Base64 Match
       try {
         const decoded = atob(paramVal);
-        if (sourceDom.dataAttributes) {
-          for (const [attrName, attrVal] of Object.entries(sourceDom.dataAttributes)) {
+        if (sourceDom.buttonDataset) {
+          for (const [attrName, attrVal] of Object.entries(sourceDom.buttonDataset)) {
             if (attrVal === decoded) {
               bindings.push({
                 paramName,
-                sourceType: 'data_attr',
-                selector: \`[data-\${attrName}]\`,
+                sourceType: 'button_data_attr',
+                selector: '#download-btn, .download-btn',
                 attribute: \`data-\${attrName}\`,
                 transform: 'btoa',
                 confidence: 0.98,
-                description: \`Base64 encoded from data-\${attrName}\`
+                description: \`Base64 encoded from Download Button attribute data-\${attrName}\`
               });
               matched = true;
               break;
@@ -145,7 +302,7 @@ export class RelationshipSolver {
 
       if (matched) continue;
 
-      // Strategy D: SSR / Next.js Hydration AST Recursive Prober
+      // 5. SSR / Next.js Hydration AST Recursive Prober
       if (sourceDom.nextData) {
         const jsonPath = this.searchObject(sourceDom.nextData, paramVal);
         if (jsonPath) {
@@ -164,7 +321,7 @@ export class RelationshipSolver {
 
       if (matched) continue;
 
-      // Strategy E: URL Token / Slug Direct Match
+      // 6. URL Token / Slug Direct Match
       if (sourceDom.urlTokens) {
         for (const token of sourceDom.urlTokens) {
           if (token === paramVal) {
@@ -183,30 +340,14 @@ export class RelationshipSolver {
       }
     }
 
-    const endpointTemplate = \`\${targetUrlObj.origin}\${targetUrlObj.pathname}\`;
-    const isThirdPartyHub = this.isExternalHub(targetUrl);
-
-    return {
-      domain: new URL(sourceDom.url).hostname,
-      endpointTemplate,
-      isThirdPartyHub,
-      httpMethod: 'GET',
-      bindings,
-      headers: {
-        'Accept': 'application/json, text/plain, */*',
-        'Referer': sourceDom.url
-      },
-      createdAt: new Date().toISOString()
-    };
+    return bindings;
   }
 
   static searchObject(obj, targetVal, currentPath = '') {
     if (!obj || typeof obj !== 'object') return null;
     for (const [key, val] of Object.entries(obj)) {
       const newPath = currentPath ? \`\${currentPath}.\${key}\` : key;
-      if (String(val) === String(targetVal)) {
-        return newPath;
-      }
+      if (String(val) === String(targetVal)) return newPath;
       if (typeof val === 'object') {
         const found = this.searchObject(val, targetVal, newPath);
         if (found) return found;
@@ -219,6 +360,11 @@ export class RelationshipSolver {
     const hubDomains = ['mediafire.com', 'mega.nz', 'drive.google.com', 'rapidgator.net', 's3.amazonaws.com', 'r2.cloudflarestorage.com'];
     return hubDomains.some(hub => url.includes(hub));
   }
+
+  static isAdTracker(url) {
+    const adDomains = ['doubleclick', 'google-analytics', 'adnxs', 'popcash', 'propellerads', 'adsterra', 'exoclick', 'monetag', 'track', 'beacon', 'telemetry'];
+    return adDomains.some(ad => url.toLowerCase().includes(ad));
+  }
 }`,
 
   'background.js': `import { RelationshipSolver } from './solver.js';
@@ -226,8 +372,42 @@ export class RelationshipSolver {
 let currentSession = null;
 
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('[DirectLink Engine] Extension installed successfully.');
+  console.log('[DirectLink Engine v2] Multi-Step & Backend API Resolver Extension installed.');
 });
+
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (!currentSession) return;
+    if (['image', 'stylesheet', 'font', 'media'].includes(details.type)) return;
+
+    let bodyData = null;
+    if (details.requestBody && details.requestBody.raw) {
+      try {
+        const decoder = new TextDecoder('utf-8');
+        const rawText = details.requestBody.raw.map(b => b.bytes ? decoder.decode(b.bytes) : '').join('');
+        if (rawText.startsWith('{')) {
+          bodyData = JSON.parse(rawText);
+        } else {
+          bodyData = rawText;
+        }
+      } catch (e) {}
+    } else if (details.requestBody && details.requestBody.formData) {
+      bodyData = details.requestBody.formData;
+    }
+
+    currentSession.hops.push({
+      url: details.url,
+      method: details.method,
+      type: details.type,
+      requestBody: bodyData,
+      timestamp: Date.now()
+    });
+
+    console.log(\`[DirectLink Network Sniffer] Captured \${details.method} \${details.url}\`);
+  },
+  { urls: ['<all_urls>'] },
+  ['requestBody']
+);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'START_SOURCE_RECORDING') {
@@ -254,14 +434,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const recipe = RelationshipSolver.solve(
         currentSession.sourceDom,
         message.targetUrl,
-        message.targetBody
+        message.targetBody,
+        currentSession.hops
       );
 
       const domain = new URL(currentSession.sourceUrl).hostname;
       const storageKey = \`recipe_\${domain}\`;
 
       chrome.storage.local.set({ [storageKey]: recipe }, () => {
-        console.log(\`[DirectLink Engine] Synthesized and saved recipe for \${domain}:\`, recipe);
+        console.log(\`[DirectLink Engine] Synthesized and saved recipe (\${recipe.strategy}) for \${domain}:\`, recipe);
         sendResponse({ status: 'success', recipe, domain });
         currentSession = null;
       });
@@ -278,7 +459,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       currentSession: currentSession ? {
         sourceUrl: currentSession.sourceUrl,
         domain: new URL(currentSession.sourceUrl).hostname,
-        durationSeconds: Math.floor((Date.now() - currentSession.startTime) / 1000)
+        durationSeconds: Math.floor((Date.now() - currentSession.startTime) / 1000),
+        capturedHopsCount: currentSession.hops.length
       } : null
     });
     return true;
@@ -319,8 +501,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   chrome.storage.local.get([\`recipe_\${currentDomain}\`], (res) => {
     const recipe = res[\`recipe_\${currentDomain}\`];
-    if (recipe && recipe.bindings) {
-      console.log('[DirectLink Engine] Active recipe found for:', currentDomain);
+    if (recipe) {
+      console.log(\`[DirectLink Engine] Active recipe found for \${currentDomain} (\${recipe.strategy})\`);
       injectDirectBypassUI(recipe);
     }
   });
@@ -363,6 +545,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     });
 
+    const buttonDataset = {};
+    const downloadBtns = document.querySelectorAll('#btn-download, #download-button, .download-btn, .btn-download, a[href*="download"], [data-action="download"], button[data-id], button[data-file]');
+    downloadBtns.forEach(btn => {
+      for (const [k, v] of Object.entries(btn.dataset)) {
+        buttonDataset[k] = v;
+      }
+      if (btn.getAttribute('href') && !btn.getAttribute('href').startsWith('#') && !btn.getAttribute('href').startsWith('javascript:')) {
+        buttonDataset['button_href'] = btn.getAttribute('href');
+      }
+    });
+
     let nextData = null;
     const nextScript = document.getElementById('__NEXT_DATA__');
     if (nextScript) {
@@ -378,6 +571,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       title: document.title,
       metaTags,
       dataAttributes,
+      buttonDataset,
       nextData,
       urlTokens: pathParts
     };
@@ -420,85 +614,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         e.preventDefault();
         e.stopPropagation();
 
-        fastBtn.innerHTML = '⏳ Resolving Direct Download Link...';
+        fastBtn.innerHTML = '⏳ Bypassing Ads & Minting Direct Stream...';
         fastBtn.style.opacity = '0.7';
 
         try {
-          const queryParams = new URLSearchParams();
-
-          if (recipe.bindings && Array.isArray(recipe.bindings)) {
-            for (const b of recipe.bindings) {
-              let extractedVal = '';
-
-              if (b.sourceType === 'meta') {
-                const el = document.querySelector(b.selector);
-                if (el) extractedVal = el.getAttribute(b.attribute || 'content') || '';
-              } else if (b.sourceType === 'data_attr') {
-                const el = document.querySelector(b.selector);
-                if (el) extractedVal = el.getAttribute(b.attribute) || el.dataset[b.attribute.replace('data-', '')] || '';
-              } else if (b.sourceType === 'url_slug') {
-                extractedVal = window.location.pathname.split('/').filter(Boolean).pop() || '';
-              } else if (b.sourceType === 'next_data') {
-                const nextScript = document.getElementById('__NEXT_DATA__');
-                if (nextScript) {
-                  try {
-                    const parsed = JSON.parse(nextScript.textContent);
-                    const keys = b.attribute.split('.');
-                    let cur = parsed;
-                    for (const k of keys) {
-                      cur = cur ? cur[k] : undefined;
-                    }
-                    if (cur) extractedVal = String(cur);
-                  } catch (e) {}
-                }
-              }
-
-              if (b.transform === 'btoa' && extractedVal) {
-                extractedVal = btoa(extractedVal);
-              }
-
-              if (extractedVal) {
-                queryParams.set(b.paramName, extractedVal);
-              }
-            }
-          }
-
-          const targetUrl = new URL(recipe.endpointTemplate);
-          queryParams.forEach((v, k) => {
-            targetUrl.searchParams.set(k, v);
-          });
-
-          const response = await fetch(targetUrl.toString(), {
-            headers: {
-              'Accept': 'application/json, text/plain, */*',
-              'Referer': window.location.href
-            }
-          });
-
-          const contentType = response.headers.get('content-type') || '';
-          if (contentType.includes('application/json')) {
-            const data = await response.json();
-            const directUrl = data.cdn_direct_url || data.download_url || data.url || data.link || targetUrl.toString();
-            fastBtn.innerHTML = '✓ Download Triggered!';
-            window.location.href = directUrl;
+          if (recipe.strategy === 'BACKEND_API_MINTER') {
+            await executeBackendApiMinting(recipe, originalEl, fastBtn);
+          } else if (recipe.strategy === 'MULTI_STEP_CHAIN') {
+            await executeMultiStepChain(recipe, originalEl, fastBtn);
           } else {
-            fastBtn.innerHTML = '✓ Download Triggered!';
-            window.location.href = targetUrl.toString();
+            await executeDirectUrlTemplate(recipe, originalEl, fastBtn);
           }
-
-          setTimeout(() => {
-            fastBtn.innerHTML = '⚡ Instant Direct Download <span style="font-size:10px; opacity:0.8;">(DirectLink)</span>';
-            fastBtn.style.opacity = '1';
-          }, 3000);
-
         } catch (err) {
+          console.error('[DirectLink Engine] Execution error:', err);
           fastBtn.innerHTML = '⚠️ Bypass Failed - Click for Manual';
           fastBtn.style.background = '#dc2626';
           setTimeout(() => {
             fastBtn.innerHTML = '⚡ Instant Direct Download';
             fastBtn.style.background = 'linear-gradient(135deg, #059669 0%, #0d9488 100%)';
             fastBtn.style.opacity = '1';
-          }, 3000);
+          }, 3500);
         }
       };
 
@@ -506,6 +641,200 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         originalEl.parentNode.insertBefore(fastBtn, originalEl.nextSibling);
       }
     });
+  }
+
+  async function executeBackendApiMinting(recipe, originalEl, fastBtn) {
+    const queryParams = new URLSearchParams();
+    const bodyPayload = {};
+
+    if (recipe.queryBindings && Array.isArray(recipe.queryBindings)) {
+      for (const b of recipe.queryBindings) {
+        const val = extractValueFromBinding(b, originalEl);
+        if (val) queryParams.set(b.paramName, val);
+      }
+    }
+
+    if (recipe.bodyBindings && Array.isArray(recipe.bodyBindings)) {
+      for (const b of recipe.bodyBindings) {
+        const val = extractValueFromBinding(b, originalEl);
+        if (val) bodyPayload[b.paramName] = val;
+      }
+    }
+
+    const apiUrl = new URL(recipe.endpointTemplate);
+    queryParams.forEach((v, k) => apiUrl.searchParams.set(k, v));
+
+    console.log(\`[DirectLink Engine] Calling Minting API: \${recipe.httpMethod} \${apiUrl.toString()}\`);
+
+    const fetchOptions = {
+      method: recipe.httpMethod || 'GET',
+      headers: {
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/json',
+        'Referer': window.location.href
+      },
+      credentials: 'include'
+    };
+
+    if (recipe.httpMethod === 'POST') {
+      fetchOptions.body = JSON.stringify(bodyPayload);
+    }
+
+    const res = await fetch(apiUrl.toString(), fetchOptions);
+    const contentType = res.headers.get('content-type') || '';
+
+    let directDownloadUrl = null;
+
+    if (contentType.includes('application/json')) {
+      const data = await res.json();
+      console.log('[DirectLink Engine] Received API Minting Response:', data);
+
+      for (const key of (recipe.responseExtractors || ['download_url', 'url', 'cdn_url', 'link'])) {
+        const val = getNestedProp(data, key);
+        if (val && typeof val === 'string' && val.startsWith('http')) {
+          directDownloadUrl = val;
+          break;
+        }
+      }
+
+      if (!directDownloadUrl) {
+        directDownloadUrl = findFirstHttpUrl(data);
+      }
+    } else {
+      directDownloadUrl = apiUrl.toString();
+    }
+
+    if (directDownloadUrl) {
+      fastBtn.innerHTML = '✓ Download Triggered!';
+      fastBtn.style.opacity = '1';
+      window.location.href = directDownloadUrl;
+    } else {
+      throw new Error('Could not extract download URL from API response');
+    }
+  }
+
+  async function executeMultiStepChain(recipe, originalEl, fastBtn) {
+    const step1 = recipe.step1;
+    const queryParams = new URLSearchParams();
+
+    if (step1.bindings) {
+      for (const b of step1.bindings) {
+        const val = extractValueFromBinding(b, originalEl);
+        if (val) queryParams.set(b.paramName, val);
+      }
+    }
+
+    const brokerUrl = new URL(step1.endpoint);
+    queryParams.forEach((v, k) => brokerUrl.searchParams.set(k, v));
+
+    console.log('[DirectLink Engine] Querying Broker Step 1:', brokerUrl.toString());
+
+    const brokerRes = await fetch(brokerUrl.toString(), {
+      headers: { 'Referer': window.location.href },
+      credentials: 'include'
+    });
+
+    const bridgeHtml = await brokerRes.text();
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(bridgeHtml, 'text/html');
+
+    let terminalLink = null;
+    for (const selector of (recipe.step2?.candidateSelectors || ['#btn-download', 'a[href*="download"]'])) {
+      const candidateEl = doc.querySelector(selector);
+      if (candidateEl && candidateEl.getAttribute('href')) {
+        const href = candidateEl.getAttribute('href');
+        if (href.startsWith('http')) {
+          terminalLink = href;
+          break;
+        } else if (href.startsWith('/')) {
+          terminalLink = new URL(href, brokerUrl.origin).toString();
+          break;
+        }
+      }
+    }
+
+    if (terminalLink) {
+      console.log('[DirectLink Engine] Terminal link resolved from Bridge Page:', terminalLink);
+      fastBtn.innerHTML = '✓ Download Triggered!';
+      fastBtn.style.opacity = '1';
+      window.location.href = terminalLink;
+    } else {
+      window.location.href = brokerUrl.toString();
+    }
+  }
+
+  async function executeDirectUrlTemplate(recipe, originalEl, fastBtn) {
+    const queryParams = new URLSearchParams();
+
+    if (recipe.bindings && Array.isArray(recipe.bindings)) {
+      for (const b of recipe.bindings) {
+        const val = extractValueFromBinding(b, originalEl);
+        if (val) queryParams.set(b.paramName, val);
+      }
+    }
+
+    const targetUrl = new URL(recipe.endpointTemplate);
+    queryParams.forEach((v, k) => targetUrl.searchParams.set(k, v));
+
+    fastBtn.innerHTML = '✓ Download Triggered!';
+    fastBtn.style.opacity = '1';
+    window.location.href = targetUrl.toString();
+  }
+
+  function extractValueFromBinding(binding, originalEl) {
+    let val = '';
+
+    if (binding.sourceType === 'button_data_attr' && originalEl) {
+      const attrKey = binding.attribute.replace('data-', '');
+      val = originalEl.dataset[attrKey] || originalEl.getAttribute(binding.attribute) || '';
+    } else if (binding.sourceType === 'meta') {
+      const el = document.querySelector(binding.selector);
+      if (el) val = el.getAttribute(binding.attribute || 'content') || '';
+    } else if (binding.sourceType === 'data_attr') {
+      const el = document.querySelector(binding.selector);
+      if (el) val = el.getAttribute(binding.attribute) || el.dataset[binding.attribute.replace('data-', '')] || '';
+    } else if (binding.sourceType === 'url_slug') {
+      val = window.location.pathname.split('/').filter(Boolean).pop() || '';
+    } else if (binding.sourceType === 'next_data') {
+      const nextScript = document.getElementById('__NEXT_DATA__');
+      if (nextScript) {
+        try {
+          const parsed = JSON.parse(nextScript.textContent);
+          val = String(getNestedProp(parsed, binding.attribute) || '');
+        } catch (e) {}
+      }
+    }
+
+    if (binding.transform === 'btoa' && val) {
+      val = btoa(val);
+    }
+
+    return val;
+  }
+
+  function getNestedProp(obj, path) {
+    if (!obj || !path) return undefined;
+    const parts = path.split('.');
+    let cur = obj;
+    for (const p of parts) {
+      if (cur == null) return undefined;
+      cur = cur[p];
+    }
+    return cur;
+  }
+
+  function findFirstHttpUrl(obj) {
+    if (!obj || typeof obj !== 'object') return null;
+    for (const val of Object.values(obj)) {
+      if (typeof val === 'string' && val.startsWith('http') && !val.includes('logo') && !val.includes('.png')) {
+        return val;
+      }
+      if (typeof val === 'object') {
+        const found = findFirstHttpUrl(val);
+        if (found) return found;
+      }
+    }
+    return null;
   }
 })();`,
 
@@ -575,7 +904,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   </div>
 
   <div class="footer">
-    <span>DirectLink v1.0 • Manifest V3</span>
+    <span>DirectLink v2.0 • Multi-Step & Backend API Resolver</span>
   </div>
 
   <script type="module" src="popup.js"></script>
@@ -1001,7 +1330,12 @@ btnTagTarget.addEventListener('click', async () => {
     }, (res) => {
       btnTagTarget.querySelector('.btn-title').textContent = '2. Tag Target Download Link';
       if (res && res.status === 'success') {
-        alert(\`🎉 Success! Direct bypass recipe generated for \${res.domain} with \${res.recipe.bindings.length} parameter bindings.\`);
+        const strategyLabel = res.recipe.strategy === 'BACKEND_API_MINTER' 
+          ? 'Backend Minting API' 
+          : res.recipe.strategy === 'MULTI_STEP_CHAIN' 
+            ? 'Multi-Step Broker Chain' 
+            : 'Direct URL Template';
+        alert(\`🎉 Success! Generated \${strategyLabel} recipe for \${res.domain}.\`);
         setRecordingUI(false);
         loadSavedRecipes();
       } else {
@@ -1036,7 +1370,7 @@ function loadSavedRecipes() {
       item.innerHTML = \`
         <div class="recipe-info">
           <span class="recipe-domain">⚡ \${recipe.domain}</span>
-          <span class="recipe-rules">\${recipe.bindings.length} dynamic bindings • \${recipe.isThirdPartyHub ? 'External Host' : 'Direct API'}</span>
+          <span class="recipe-rules">\${recipe.strategy || 'DIRECT'} • \${recipe.description ? recipe.description.slice(0, 45) + '...' : ''}</span>
         </div>
         <button class="btn-delete-recipe" data-domain="\${recipe.domain}" title="Delete Recipe">✕</button>
       \`;
@@ -1059,6 +1393,7 @@ init();`,
   'README.md': `# ⚡ DirectLink - Chrome Extension (Manifest V3)
 
 > **Record-and-Generalize Extension to reverse-engineer ad-gate loops and provide instant 1-click downloads.**
+> **Now supporting Multi-Step DAGs, Backend API Minting, and Chained Intermediate Brokers.**
 
 ---
 
@@ -1074,11 +1409,10 @@ init();`,
 
 ---
 
-## 🎯 2-Tag Workflow:
-1. Open the source resource page -> Open extension popup -> Click **"1. Tag Page as Source"**.
-2. Complete the human verification/redirect steps manually just once.
-3. On the final download page -> Open extension popup -> Click **"2. Tag Target Download Link"**.
-4. Done! Any future visits to items on this domain will show a direct green **"⚡ Instant Direct Download"** button with 0 ads!
+## 🧠 Advanced Resolution Architectures Supported:
+1. **Direct URL Template Matching**: Parameters extracted from source page are bound into the final link.
+2. **Backend API Minting**: The website uses button/DOM data to call an internal/external API, which mints and returns the download link JSON. The extension calls this API directly on future pages.
+3. **Chained Intermediate Brokers**: The website calls an intermediate gateway/broker that yields a bridge page containing the real download button. The extension resolves this bridge in the background with zero ads.
 `
 };
 

@@ -40,11 +40,12 @@ import {
 
 export const ExtensionArchitectureBlueprint: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'interactive_demo' | 'solvers' | 'manifest_v3_code' | 'edge_cases'>('interactive_demo');
+  const [demoScenario, setDemoScenario] = useState<'api_minter' | 'chained_broker' | 'direct_url'>('api_minter');
   const [demoStep, setDemoStep] = useState<number>(1);
   const [simulatingInference, setSimulatingInference] = useState<boolean>(false);
   const [testOnTargetB, setTestOnTargetB] = useState<boolean>(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [selectedSolver, setSelectedSolver] = useState<number>(1);
+  const [selectedSolver, setSelectedSolver] = useState<number>(4);
   const [activeCodeFile, setActiveCodeFile] = useState<'manifest' | 'background' | 'content' | 'solver' | 'popup'>('solver');
 
   const handleCopy = (text: string, key: string) => {
@@ -86,30 +87,30 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
     },
     {
       id: 4,
-      name: 'Causal Network DAG Backtracker',
-      summary: 'Traces where the final link was minted by searching the response bodies of the recorded trip.',
-      mathFormula: 'MintingReq = \\arg\\min_{req \\in Trace} \\{ t(req) \\mid TargetURL \\in req.ResponseBody \\}',
-      howItWorks: 'The extension inspects all recorded HTTP response bodies across the entire trip. It searches for the final download link (or a unique sub-token). Once the exact response containing the link is identified, that request is flagged as the "Minting API". The extension then backtracks what parameters were needed to trigger that minting call.',
-      exampleSource: 'User clicks ad loop -> Wait 15s -> Final AJAX call occurs',
-      exampleTarget: 'Response of POST /api/get-direct-cdn contains {"url": "https://s3.aws.com/..."}',
-      inferredRule: 'Execute POST /api/get-direct-cdn { assetId: extractSourceId() } -> Parse json.url'
+      name: 'Backend Minting API Sniffer',
+      summary: 'Detects when the website calls an internal or external backend API using button metadata to mint download URLs.',
+      mathFormula: 'MintingReq = \\arg\\min_{req \\in Trace} \\{ t(req) \\mid TargetURL \\in req.ResponseBody \\vee req.type \\in \\{xhr, fetch\\} \\}',
+      howItWorks: 'Websites often use button data-attributes (e.g. data-file-id, data-hash) to trigger an internal API (POST /api/v2/generate-link) or 3rd-party minting endpoint which returns a JSON payload containing the real download URL. DirectLink intercepts this API request during recording, maps the parameters from the button dataset, and calls the API directly in the background.',
+      exampleSource: 'Download Button: data-file-id="bk_88291", data-token="sec_9918"',
+      exampleTarget: 'POST /api/v2/generate-link -> Response: {"download_url": "https://cdn.files.com/stream/..."}',
+      inferredRule: 'fetch("/api/v2/generate-link", { method: "POST", body: { file_id: button.dataset.fileId } }) -> extract response.download_url'
     },
     {
       id: 5,
-      name: 'Third-Party External Hub Bridge Resolver',
-      summary: 'Handles cases where download is hosted on MediaFire, Mega, Google Drive, or external CDNs.',
-      mathFormula: 'Source \\xrightarrow{extract} HubLink \\xrightarrow{fast\\_fetch} DirectBinary',
-      howItWorks: 'When the resource does not stay within the source domain, the engine detects whether the intermediate or target URL is a known external host (MediaFire, Google Drive, Rapidgator, S3 bucket). The recipe chains an extraction rule (get hub URL from Source) with a known direct resolver for that hub.',
-      exampleSource: 'Source page has obfuscated link pointing to: https://mediafire.com/file/abc123xyz',
-      exampleTarget: 'Direct Download from MediaFire CDN',
-      inferredRule: 'Step 1: Extract MediaFire URL from source page\nStep 2: Fetch MediaFire page with direct stream header -> Extract final CDN link'
+      name: 'Multi-Step Chained Broker & Bridge Resolver',
+      summary: 'Resolves intermediate broker services where source data is sent to an external gateway that serves a bridge page with the terminal button.',
+      mathFormula: 'Source \\xrightarrow{params} BrokerGateway \\xrightarrow{fetch\\_bridge} TerminalHTML \\xrightarrow{selector} DirectBinary',
+      howItWorks: 'When the website passes parameters to an intermediate service (e.g. https://link-broker.com/view?id=...) that serves an HTML page containing the real download button, DirectLink models this as a Multi-Step DAG. On future pages, it calls the broker, parses the bridge page headlessly for the terminal selector, and starts the file stream with zero ads.',
+      exampleSource: 'Source button points to: https://broker-gate.org/route?session=bk_88291',
+      exampleTarget: 'Bridge page serves <a id="btn-download" href="https://cdn.vault.io/stream/...">',
+      inferredRule: 'Step 1: GET broker-gate.org/route?session={id}\nStep 2: Parse bridge HTML for #btn-download -> Navigate to direct href'
     },
     {
       id: 6,
       name: 'Differential Fuzzing & Header Minimizer',
       summary: 'Strips unnecessary cookies and headers to find the absolute minimal HTTP request needed.',
       mathFormula: 'MinHeaders = \\arg\\min_{H \\subseteq Headers} \\{ |H| \\mid API(H) = 200 \\}',
-      howItWorks: 'The recorded trip might contain 40 ad cookies, tracking telemetry, and analytics. The extension sends 3 lightweight verification probes with stripped headers to confirm if only the Referer or a single session cookie is required, making the final synthesized recipe lightweight and fast.',
+      howItWorks: 'The recorded trip might contain 40 ad cookies, tracking telemetry, and analytics. The extension sends lightweight verification probes with stripped headers to confirm if only the Referer or a single session cookie is required, making the final synthesized recipe lightweight and fast.',
       exampleSource: 'Recorded request had 45 ad cookies + 20 tracking headers',
       exampleTarget: 'Minimal verified request needs only: Referer + User-Agent',
       inferredRule: 'Strip all ad cookies. Replay with: headers = { "Referer": sourceUrl }'
@@ -190,10 +191,10 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
               <div>
                 <h2 className="text-lg font-bold text-white font-['Space_Grotesk'] flex items-center gap-2">
                   <MousePointer className="w-5 h-5 text-indigo-400" />
-                  Interactive End-to-End Extension Workflow
+                  Interactive Extension Resolution Engine
                 </h2>
                 <p className="text-xs text-slate-400 font-mono mt-1">
-                  Experience how the user tags the source, records the ad trip, tags the target, and synthesizes an instant bypass rule.
+                  Simulate how the extension reverse-engineers backend APIs, multi-hop broker chains, or direct URL templates.
                 </p>
               </div>
 
@@ -202,6 +203,77 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
                 <span className="px-2.5 py-1 rounded-lg bg-indigo-950 border border-indigo-500/40 text-indigo-300 font-bold">
                   Step {demoStep} of 4
                 </span>
+              </div>
+            </div>
+
+            {/* Scenario Architecture Selector */}
+            <div className="space-y-2">
+              <span className="text-[11px] font-mono text-slate-400 uppercase font-bold tracking-wider">
+                Select Website Resolution Architecture:
+              </span>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <button
+                  onClick={() => {
+                    setDemoScenario('api_minter');
+                    setDemoStep(1);
+                    setTestOnTargetB(false);
+                  }}
+                  className={`p-3.5 rounded-xl text-left transition border cursor-pointer ${
+                    demoScenario === 'api_minter'
+                      ? 'bg-indigo-950/70 border-indigo-400 text-white shadow-lg shadow-indigo-600/20'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white hover:bg-slate-850'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-indigo-300 font-mono">1. Backend Minting API</span>
+                    {demoScenario === 'api_minter' && <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>}
+                  </div>
+                  <p className="text-[11px] text-slate-300 mt-1 leading-snug">
+                    Website calls an internal or external backend API with button/page data, which responds with direct download JSON.
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setDemoScenario('chained_broker');
+                    setDemoStep(1);
+                    setTestOnTargetB(false);
+                  }}
+                  className={`p-3.5 rounded-xl text-left transition border cursor-pointer ${
+                    demoScenario === 'chained_broker'
+                      ? 'bg-indigo-950/70 border-indigo-400 text-white shadow-lg shadow-indigo-600/20'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white hover:bg-slate-850'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-cyan-300 font-mono">2. Chained Intermediate Broker</span>
+                    {demoScenario === 'chained_broker' && <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>}
+                  </div>
+                  <p className="text-[11px] text-slate-300 mt-1 leading-snug">
+                    Button sends data to an intermediate service/gateway which serves a bridge page containing the real download button.
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setDemoScenario('direct_url');
+                    setDemoStep(1);
+                    setTestOnTargetB(false);
+                  }}
+                  className={`p-3.5 rounded-xl text-left transition border cursor-pointer ${
+                    demoScenario === 'direct_url'
+                      ? 'bg-indigo-950/70 border-indigo-400 text-white shadow-lg shadow-indigo-600/20'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white hover:bg-slate-850'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-amber-300 font-mono">3. Direct URL Template</span>
+                    {demoScenario === 'direct_url' && <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>}
+                  </div>
+                  <p className="text-[11px] text-slate-300 mt-1 leading-snug">
+                    Parameters and Base64 tokens from the source DOM are interpolated directly into the final download URL.
+                  </p>
+                </button>
               </div>
             </div>
 
@@ -223,9 +295,21 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
                         <h3 className="text-sm font-bold text-white">Advanced Calculus (9th Edition)</h3>
                         <p className="text-xs text-slate-400 font-mono">ISBN: 978-0134437768 | PDF (42 MB)</p>
                       </div>
-                      <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-                        data-book-id="bk_88291"
-                      </span>
+                      <div className="flex items-center gap-2">
+                        {demoScenario === 'api_minter' && (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-950 border border-indigo-500/40 text-indigo-300">
+                            Calls Backend: /api/v2/generate-link
+                          </span>
+                        )}
+                        {demoScenario === 'chained_broker' && (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-950 border border-cyan-500/40 text-cyan-300">
+                            Calls Broker: gateway.io/bridge
+                          </span>
+                        )}
+                        <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                          data-book-id="bk_88291"
+                        </span>
+                      </div>
                     </div>
 
                     <div className="p-4 bg-slate-900/50 rounded-lg border border-dashed border-indigo-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -235,7 +319,9 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
                           Download Button (Tag with Extension)
                         </span>
                         <p className="text-[11px] text-slate-400">
-                          Clicking this button normally sends user to 3 intrusive ad pages with 15s timers.
+                          {demoScenario === 'api_minter' && 'Button contains data-file-id="bk_88291" and data-auth-token="sec_9918". Clicking it invokes an internal backend API!'}
+                          {demoScenario === 'chained_broker' && 'Button contains data-broker-key="bk_88291". Clicking it opens an intermediate ad gateway page.'}
+                          {demoScenario === 'direct_url' && 'Button leads to an ad redirection chain before landing on the target download URL.'}
                         </p>
                       </div>
 
@@ -252,40 +338,90 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
 
                 <div className="bg-indigo-950/20 border border-indigo-500/30 p-4 rounded-xl text-xs text-slate-300 space-y-1">
                   <strong className="text-indigo-300 font-mono">What the extension does in the background:</strong>
-                  <p>Attaches <code>chrome.debugger</code> and <code>chrome.webRequest</code> listeners to tab. Takes DOM snapshot (meta tags, Next.js hydration state, button CSS selector <code>#btn-download</code>, and URL tokens).</p>
+                  <p>Attaches <code>chrome.webRequest.onBeforeRequest</code> to sniff all API and navigation traffic. Takes DOM snapshot (button dataset attributes, meta tags, Next.js hydration state, and URL tokens).</p>
                 </div>
               </div>
             )}
 
-            {/* Step 2: Navigate Ad Chain */}
+            {/* Step 2: Navigate Ad Chain & Capture Network Requests */}
             {demoStep === 2 && (
               <div className="space-y-5">
                 <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 space-y-4">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-mono text-amber-400 font-bold uppercase tracking-wider flex items-center gap-1.5">
                       <Clock className="w-4 h-4 animate-spin text-amber-400" />
-                      Manual Trip Recording in Progress (3 Hops Captured)
+                      Trip Recording Active (Network Sniffer Intercepted Traffic)
                     </span>
-                    <span className="text-[11px] font-mono text-slate-400">Step 2: Recording Navigation</span>
+                    <span className="text-[11px] font-mono text-slate-400">Step 2: Passive Traffic Sniffing</span>
                   </div>
 
                   <div className="space-y-2">
-                    {[
-                      { hop: 1, domain: 'https://ad-syndicate.net/redirect?pub=99&data=YmtfODgyOTE=', status: '302 Found', note: 'Carrying Base64 of bk_88291' },
-                      { hop: 2, domain: 'https://timer-gate-interstitial.xyz/wait?session=s_1029', status: '200 OK', note: '15s ad countdown timer executed' },
-                      { hop: 3, domain: 'https://final-download-portal.org/claim?id=bk_88291', status: '200 OK', note: 'Landing on final page with green direct button' }
-                    ].map((hop) => (
-                      <div key={hop.hop} className="p-3 bg-slate-950 rounded-lg border border-slate-800 flex items-center justify-between text-xs font-mono">
-                        <div className="flex items-center gap-2">
-                          <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">Hop {hop.hop}</span>
-                          <span className="text-slate-200 truncate max-w-[280px] sm:max-w-[400px]">{hop.domain}</span>
+                    {demoScenario === 'api_minter' ? (
+                      <>
+                        <div className="p-3 bg-slate-950 rounded-lg border border-indigo-500/30 flex items-center justify-between text-xs font-mono">
+                          <div className="flex items-center gap-2">
+                            <span className="px-1.5 py-0.5 rounded bg-indigo-950 text-indigo-300 text-[10px] font-bold">API XHR</span>
+                            <span className="text-indigo-200 truncate max-w-[280px] sm:max-w-[400px]">POST https://e-library-hub.io/api/v2/generate-link</span>
+                          </div>
+                          <span className="text-emerald-400 font-bold">Payload: {`{ file_id: "bk_88291" }`}</span>
                         </div>
-                        <div className="flex items-center gap-3">
-                          <span className="text-slate-400 text-[11px] hidden sm:inline">{hop.note}</span>
-                          <span className="text-emerald-400 font-bold">{hop.status}</span>
+                        <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 flex items-center justify-between text-xs font-mono">
+                          <div className="flex items-center gap-2">
+                            <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">Response</span>
+                            <span className="text-slate-300 truncate max-w-[280px] sm:max-w-[400px]">{`{ "status": "ok", "download_url": "https://cdn.vault.io/stream/bk_88291.pdf" }`}</span>
+                          </div>
+                          <span className="text-emerald-400 font-bold">200 OK</span>
                         </div>
-                      </div>
-                    ))}
+                        <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 flex items-center justify-between text-xs font-mono">
+                          <div className="flex items-center gap-2">
+                            <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">Ad Pop</span>
+                            <span className="text-slate-400 truncate max-w-[280px] sm:max-w-[400px]">https://popcash-tracker.net/ad?click_id=99281</span>
+                          </div>
+                          <span className="text-slate-500">Ignored Noise</span>
+                        </div>
+                      </>
+                    ) : demoScenario === 'chained_broker' ? (
+                      <>
+                        <div className="p-3 bg-slate-950 rounded-lg border border-cyan-500/30 flex items-center justify-between text-xs font-mono">
+                          <div className="flex items-center gap-2">
+                            <span className="px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 text-[10px] font-bold">Broker</span>
+                            <span className="text-cyan-200 truncate max-w-[280px] sm:max-w-[400px]">GET https://gateway-broker.io/view?resource=bk_88291</span>
+                          </div>
+                          <span className="text-emerald-400 font-bold">200 OK</span>
+                        </div>
+                        <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 flex items-center justify-between text-xs font-mono">
+                          <div className="flex items-center gap-2">
+                            <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">Bridge HTML</span>
+                            <span className="text-slate-300 truncate max-w-[280px] sm:max-w-[400px]">Contains {`<a id="download-btn" href="https://cdn.vault.io/stream/bk_88291.pdf">`}</span>
+                          </div>
+                          <span className="text-emerald-400 font-bold">Parsed DOM</span>
+                        </div>
+                        <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 flex items-center justify-between text-xs font-mono">
+                          <div className="flex items-center gap-2">
+                            <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">Ad Timer</span>
+                            <span className="text-slate-400 truncate max-w-[280px] sm:max-w-[400px]">15s Countdown Interstitial overlay</span>
+                          </div>
+                          <span className="text-amber-400 font-bold">Interrupted</span>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 flex items-center justify-between text-xs font-mono">
+                          <div className="flex items-center gap-2">
+                            <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">Hop 1</span>
+                            <span className="text-slate-200 truncate max-w-[280px] sm:max-w-[400px]">https://ad-syndicate.net/redirect?pub=99&data=YmtfODgyOTE=</span>
+                          </div>
+                          <span className="text-emerald-400 font-bold">302 Found</span>
+                        </div>
+                        <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 flex items-center justify-between text-xs font-mono">
+                          <div className="flex items-center gap-2">
+                            <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">Hop 2</span>
+                            <span className="text-slate-200 truncate max-w-[280px] sm:max-w-[400px]">https://timer-gate-interstitial.xyz/wait?session=s_1029</span>
+                          </div>
+                          <span className="text-emerald-400 font-bold">200 OK</span>
+                        </div>
+                      </>
+                    )}
                   </div>
 
                   <div className="flex justify-end pt-2">
@@ -294,7 +430,7 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
                       className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-lg shadow-emerald-600/30 transition flex items-center gap-2 cursor-pointer"
                     >
                       <CheckCircle2 className="w-4 h-4" />
-                      <span>Arrived at Final Download Page &rarr; Tag Target</span>
+                      <span>Arrived at Terminal Download Link &rarr; Tag Target</span>
                     </button>
                   </div>
                 </div>
@@ -307,7 +443,7 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
                 <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 space-y-4">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-mono text-cyan-400 font-bold uppercase tracking-wider">
-                      Target Page: https://final-download-portal.org/claim?id=bk_88291
+                      Target Link: https://cdn.vault.io/stream/bk_88291.pdf
                     </span>
                     <span className="text-[11px] font-mono text-slate-400">Step 3: Relationship Inference</span>
                   </div>
@@ -315,14 +451,16 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
                   <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 space-y-3">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-mono text-emerald-400 font-bold">
-                        Observed Terminal Asset / Minting Request:
+                        {demoScenario === 'api_minter' ? 'Identified Minting API in Network Trace:' : demoScenario === 'chained_broker' ? 'Identified Intermediate Broker Hop:' : 'Target URL Parameters:'}
                       </span>
                       <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300">
-                        application/pdf (42 MB)
+                        {demoScenario === 'api_minter' ? 'POST /api/v2/generate-link' : demoScenario === 'chained_broker' ? 'Multi-Step DAG' : 'GET cdn.vault.io'}
                       </span>
                     </div>
                     <div className="text-xs font-mono text-slate-200 bg-slate-900 p-3 rounded border border-slate-800 break-all">
-                      GET https://cdn.vault.io/api/v2/mint?book_id=bk_88291&checksum=094875c8e2b1f4a9
+                      {demoScenario === 'api_minter' && 'POST https://e-library-hub.io/api/v2/generate-link -> Response { "download_url": "https://cdn.vault.io/stream/bk_88291.pdf" }'}
+                      {demoScenario === 'chained_broker' && 'GET https://gateway-broker.io/view?resource=bk_88291 -> Bridge DOM contains #download-btn'}
+                      {demoScenario === 'direct_url' && 'GET https://cdn.vault.io/api/v2/mint?book_id=bk_88291&checksum=094875c8e2b1f4a9'}
                     </div>
                   </div>
 
@@ -332,7 +470,9 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
                         Ready to Solve Relationship (Source Page &harr; Target Endpoint)
                       </h4>
                       <p className="text-[11px] text-slate-400">
-                        The engine will cross-correlate source DOM entities with target parameters and output a reusable domain recipe.
+                        {demoScenario === 'api_minter' && 'The engine detected the backend minting API! It will map button attributes to the POST payload.'}
+                        {demoScenario === 'chained_broker' && 'The engine detected the intermediate broker! It will synthesize a 2-step headless bridge fetcher.'}
+                        {demoScenario === 'direct_url' && 'The engine will cross-correlate source DOM entities with target parameters.'}
                       </p>
                     </div>
 
@@ -367,23 +507,45 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
                       </h3>
                     </div>
                     <span className="text-xs font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold">
-                      Domain: e-library-hub.io (Active)
+                      Strategy: {demoScenario === 'api_minter' ? 'BACKEND_API_MINTER' : demoScenario === 'chained_broker' ? 'MULTI_STEP_CHAIN' : 'DIRECT_URL_TEMPLATE'}
                     </span>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs font-mono">
                     <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
                       <span className="text-slate-400 text-[10px] uppercase font-bold block mb-1">Inferred Binding Rule:</span>
-                      <p className="text-cyan-300">
-                        <code>book_id &larr; element.dataset.bookId || meta['id']</code><br />
-                        <code>checksum &larr; __NEXT_DATA__.props.fileHash</code>
-                      </p>
+                      {demoScenario === 'api_minter' ? (
+                        <p className="text-cyan-300">
+                          <code>body.file_id &larr; button.dataset.fileId</code><br />
+                          <code>responseExtractor &larr; json.download_url</code>
+                        </p>
+                      ) : demoScenario === 'chained_broker' ? (
+                        <p className="text-cyan-300">
+                          <code>step1.broker_param &larr; button.dataset.brokerKey</code><br />
+                          <code>step2.bridge_selector &larr; #download-btn</code>
+                        </p>
+                      ) : (
+                        <p className="text-cyan-300">
+                          <code>book_id &larr; element.dataset.bookId || meta['id']</code><br />
+                          <code>checksum &larr; __NEXT_DATA__.props.fileHash</code>
+                        </p>
+                      )}
                     </div>
                     <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
-                      <span className="text-slate-400 text-[10px] uppercase font-bold block mb-1">Direct Target Query:</span>
-                      <p className="text-indigo-300 truncate">
-                        <code>https://cdn.vault.io/api/v2/mint?book_id={'{book_id}'}&checksum={'{checksum}'}</code>
-                      </p>
+                      <span className="text-slate-400 text-[10px] uppercase font-bold block mb-1">Execution Action:</span>
+                      {demoScenario === 'api_minter' ? (
+                        <p className="text-indigo-300 truncate">
+                          <code>POST /api/v2/generate-link {`{ file_id }`} &rarr; direct stream</code>
+                        </p>
+                      ) : demoScenario === 'chained_broker' ? (
+                        <p className="text-indigo-300 truncate">
+                          <code>Headless fetch broker &rarr; parse DOM bridge &rarr; trigger href</code>
+                        </p>
+                      ) : (
+                        <p className="text-indigo-300 truncate">
+                          <code>https://cdn.vault.io/api/v2/mint?book_id={'{book_id}'}</code>
+                        </p>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -418,7 +580,9 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
                       <div>
                         <div className="text-xs font-bold text-slate-200">Standard Webpage Button Intercepted:</div>
                         <p className="text-[11px] text-slate-400">
-                          Original link pointed to ad networks. Extension injected instant 0-click bypass!
+                          {demoScenario === 'api_minter' && 'Original button triggers ad timers. DirectLink calls POST /api/v2/generate-link directly!'}
+                          {demoScenario === 'chained_broker' && 'Original button redirects to ad gateway. DirectLink fetches bridge page in background!'}
+                          {demoScenario === 'direct_url' && 'Original link pointed to ad networks. DirectLink injected instant 0-click bypass!'}
                         </p>
                       </div>
 
@@ -435,10 +599,12 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
                       <div className="p-4 bg-emerald-950/40 border border-emerald-500/40 rounded-xl text-xs font-mono text-emerald-300 space-y-1 animate-fadeIn">
                         <div className="font-bold flex items-center gap-1.5">
                           <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                          Direct CDN Binary Stream Triggered!
+                          Direct Binary Stream Triggered!
                         </div>
                         <p className="text-slate-300 text-[11px]">
-                          Fetched directly from: <code>https://cdn.vault.io/assets/s3/quantum-mechanics.pdf</code> (0 ad tabs opened, 0s delay).
+                          {demoScenario === 'api_minter' && 'Called POST /api/v2/generate-link { file_id: "bk_99304" } -> Received stream URL in 140ms (0 ad tabs opened, 0s delay).'}
+                          {demoScenario === 'chained_broker' && 'Fetched gateway broker headlessly in 180ms -> Extracted terminal #download-btn -> Started stream (0 popups, 0 countdowns).'}
+                          {demoScenario === 'direct_url' && 'Interpolated direct URL -> Fetched from https://cdn.vault.io/assets/s3/quantum-mechanics.pdf (0 ad tabs, 0s delay).'}
                         </p>
                       </div>
                     )}
@@ -599,211 +765,150 @@ export const ExtensionArchitectureBlueprint: React.FC = () => {
             {/* Code Display */}
             <div className="bg-slate-900 p-5 rounded-xl border border-slate-800 overflow-x-auto max-h-[550px]">
               <pre className="text-xs font-mono text-emerald-300 leading-relaxed">
-                {activeCodeFile === 'solver' && `// relationship_solver.ts - Core Inference Engine
-export interface DomSnapshot {
-  url: string;
-  metaTags: Record<string, string>;
-  dataAttributes: Record<string, string>;
-  nextData?: any;
-  slugTokens: string[];
-}
-
-export interface InferredBinding {
-  paramName: string;
-  sourceType: 'meta' | 'data_attr' | 'url_slug' | 'next_data' | 'base64_encoded' | 'hash';
-  selector: string;
-  transform: 'identity' | 'btoa' | 'atob' | 'md5' | 'json_prop';
-  confidence: number;
-}
-
+                {activeCodeFile === 'solver' && `// solver.js - v2 Record-and-Generalize Inference Engine
 export class RelationshipSolver {
   /**
-   * Discovers parameter mappings between the source page DOM and target API request.
+   * Synthesizes an executable bypass recipe based on the source DOM snapshot,
+   * terminal target URL, and network requests intercepted during the ad trip.
    */
-  public static solve(sourceDom: DomSnapshot, targetUrl: string, targetBody?: any): InferredBinding[] {
-    const bindings: InferredBinding[] = [];
-    const urlObj = new URL(targetUrl);
-    const targetParams: Record<string, string> = {};
-
-    urlObj.searchParams.forEach((v, k) => { targetParams[k] = v; });
-    if (targetBody && typeof targetBody === 'object') {
-      Object.entries(targetBody).forEach(([k, v]) => { targetParams[k] = String(v); });
+  static solve(sourceDom, targetUrl, networkHops = []) {
+    // Check Strategy 1: Did an internal or external backend API return this download link?
+    const mintingHop = this.findMintingApiHop(networkHops, targetUrl);
+    if (mintingHop) {
+      return this.synthesizeApiMinterRecipe(sourceDom, mintingHop, targetUrl);
     }
 
-    for (const [paramName, paramVal] of Object.entries(targetParams)) {
-      // 1. Direct Identity Match in meta tags
-      for (const [metaKey, metaVal] of Object.entries(sourceDom.metaTags)) {
-        if (metaVal === paramVal) {
-          bindings.push({
-            paramName,
-            sourceType: 'meta',
-            selector: \`meta[name="\${metaKey}"]\`,
-            transform: 'identity',
-            confidence: 1.0
-          });
-        }
-      }
-
-      // 2. Base64 Inverse Match
-      try {
-        const decoded = atob(paramVal);
-        for (const [attrKey, attrVal] of Object.entries(sourceDom.dataAttributes)) {
-          if (attrVal === decoded) {
-            bindings.push({
-              paramName,
-              sourceType: 'data_attr',
-              selector: \`[data-\${attrKey}]\`,
-              transform: 'btoa',
-              confidence: 0.98
-            });
-          }
-        }
-      } catch (e) {}
-
-      // 3. Next.js Hydration Prober
-      if (sourceDom.nextData) {
-        const path = this.searchObject(sourceDom.nextData, paramVal);
-        if (path) {
-          bindings.push({
-            paramName,
-            sourceType: 'next_data',
-            selector: \`__NEXT_DATA__.\${path}\`,
-            transform: 'json_prop',
-            confidence: 0.99
-          });
-        }
-      }
+    // Check Strategy 2: Did the trip pass through an intermediate broker/gateway?
+    const brokerHop = this.findBrokerHop(networkHops, sourceDom);
+    if (brokerHop) {
+      return this.synthesizeChainedBrokerRecipe(sourceDom, brokerHop, targetUrl);
     }
 
-    return bindings;
+    // Strategy 3: Parameter alignment directly into terminal URL
+    return this.synthesizeDirectUrlRecipe(sourceDom, targetUrl);
   }
 
-  private static searchObject(obj: any, targetVal: string, currentPath = ''): string | null {
-    if (!obj || typeof obj !== 'object') return null;
-    for (const [key, val] of Object.entries(obj)) {
-      const newPath = currentPath ? \`\${currentPath}.\${key}\` : key;
-      if (String(val) === targetVal) return newPath;
-      if (typeof val === 'object') {
-        const found = this.searchObject(val, targetVal, newPath);
-        if (found) return found;
+  static findMintingApiHop(networkHops, targetUrl) {
+    const targetFile = targetUrl.split('?')[0].split('/').pop();
+    return networkHops.find(hop => {
+      if (hop.type !== 'xmlhttprequest' && hop.type !== 'fetch') return false;
+      // Match if the API request URL, body, or response references the file
+      return hop.url.includes(targetFile) || (hop.requestBody && JSON.stringify(hop.requestBody).includes(targetFile));
+    });
+  }
+
+  static synthesizeApiMinterRecipe(sourceDom, mintingHop, targetUrl) {
+    const bindings = [];
+    const sourceTokens = this.extractSourceTokens(sourceDom);
+
+    // Map source button data attributes to API request parameters
+    if (mintingHop.requestBody) {
+      for (const [key, val] of Object.entries(mintingHop.requestBody)) {
+        const match = sourceTokens.find(t => t.val === String(val));
+        if (match) {
+          bindings.push({ param: key, in: 'body', selector: match.selector, attr: match.attr });
+        }
       }
     }
-    return null;
+
+    return {
+      strategy: 'BACKEND_API_MINTER',
+      endpoint: mintingHop.url,
+      method: mintingHop.method || 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      bindings,
+      responseExtractor: 'download_url || url || file_url || link'
+    };
   }
 }`}
 
-                {activeCodeFile === 'background' && `// background.ts - Service Worker
-import { RelationshipSolver } from './relationship_solver';
+                {activeCodeFile === 'background' && `// background.js - Service Worker with Passive Network Sniffer
+let currentSession = null;
 
-interface RecordingSession {
-  sourceTabId: number;
-  sourceUrl: string;
-  sourceDom?: any;
-  recordedHops: any[];
-  isRecording: boolean;
-}
+// Passively record all network hops between Tag Source and Tag Target
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (!currentSession || !currentSession.isRecording) return;
+    if (details.type === 'image' || details.type === 'stylesheet' || details.type === 'font') return;
 
-let currentSession: RecordingSession | null = null;
+    currentSession.hops.push({
+      url: details.url,
+      method: details.method,
+      type: details.type,
+      timeStamp: details.timeStamp
+    });
+  },
+  { urls: ["<all_urls>"] },
+  ["requestBody"]
+);
 
-// Listen for messages from Content Script or Popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'START_SOURCE_RECORDING') {
+  if (message.type === 'START_TRIP_RECORDING') {
     currentSession = {
-      sourceTabId: sender.tab?.id || message.tabId,
       sourceUrl: message.sourceUrl,
       sourceDom: message.domSnapshot,
-      recordedHops: [],
+      hops: [],
       isRecording: true
     };
-    
-    // Enable Chrome Debugger to passively log network requests
-    chrome.debugger.attach({ tabId: currentSession.sourceTabId }, '1.3', () => {
-      chrome.debugger.sendCommand({ tabId: currentSession.sourceTabId }, 'Network.enable');
-    });
-
     sendResponse({ status: 'recording_started' });
   }
 
-  if (message.type === 'TAG_TARGET_ENDPOINT') {
+  if (message.type === 'TAG_TARGET_URL') {
     if (!currentSession) return;
-    
-    // Run Relationship Solver
-    const recipe = RelationshipSolver.solve(
-      currentSession.sourceDom,
-      message.targetUrl,
-      message.targetBody
-    );
-
+    const recipe = RelationshipSolver.solve(currentSession.sourceDom, message.targetUrl, currentSession.hops);
     const domain = new URL(currentSession.sourceUrl).hostname;
-    
-    // Save in storage
-    chrome.storage.local.set({
-      [\`recipe_\${domain}\`]: {
-        domain,
-        targetEndpointTemplate: message.targetUrl,
-        bindings: recipe,
-        created: Date.now()
-      }
-    }, () => {
-      sendResponse({ status: 'recipe_saved', bindings: recipe });
-    });
 
-    chrome.debugger.detach({ tabId: currentSession.sourceTabId });
+    chrome.storage.local.set({ [\`recipe_\${domain}\`]: recipe }, () => {
+      sendResponse({ status: 'recipe_saved', recipe });
+    });
     currentSession = null;
   }
   return true;
 });`}
 
-                {activeCodeFile === 'content' && `// content_script.ts - Injected into target webpages
+                {activeCodeFile === 'content' && `// content_script.js - Injected into target webpages
 (async function() {
   const domain = window.location.hostname;
-  
-  // 1. Check if an active recipe exists for this domain
   const result = await chrome.storage.local.get([\`recipe_\${domain}\`]);
   const recipe = result[\`recipe_\${domain}\`];
+  if (!recipe) return;
 
-  if (recipe) {
-    console.log('[DirectLink Engine] Active recipe found for domain:', domain);
-    injectBypassButton(recipe);
-  }
+  // Intercept original download button
+  const originalBtn = document.querySelector('#btn-download, .download-btn, [data-action="download"]');
+  if (!originalBtn) return;
 
-  function injectBypassButton(recipe: any) {
-    // Locate download button
-    const originalBtn = document.querySelector('#btn-download, .download-btn, [data-action="download"]');
-    if (!originalBtn) return;
+  const bypassBtn = document.createElement('button');
+  bypassBtn.innerText = '⚡ 1-Click Direct Download (DirectLink)';
+  bypassBtn.style.cssText = 'background: #059669; color: white; padding: 10px 18px; border-radius: 8px; font-weight: bold; border: none; cursor: pointer;';
 
-    // Create fast 1-click bypass button
-    const fastBtn = document.createElement('button');
-    fastBtn.innerText = '⚡ Instant Direct Download (Bypassed)';
-    fastBtn.style.cssText = 'background: #059669; color: white; padding: 10px 16px; border-radius: 8px; font-weight: bold; border: none; cursor: pointer; margin-top: 8px;';
-    
-    fastBtn.onclick = async (e) => {
-      e.preventDefault();
-      fastBtn.innerText = '⏳ Resolving Direct CDN Link...';
+  bypassBtn.onclick = async (e) => {
+    e.preventDefault();
+    bypassBtn.innerText = '⏳ Resolving Direct CDN Link...';
 
-      // Evaluate bindings against live DOM
-      const params = new URLSearchParams();
-      for (const b of recipe.bindings) {
-        if (b.sourceType === 'meta') {
-          const el = document.querySelector(b.selector) as HTMLMetaElement;
-          if (el) params.set(b.paramName, el.content);
-        }
-      }
+    if (recipe.strategy === 'BACKEND_API_MINTER') {
+      await executeBackendApiMinting(recipe, originalBtn);
+    } else if (recipe.strategy === 'MULTI_STEP_CHAIN') {
+      await executeMultiStepChain(recipe, originalBtn);
+    } else {
+      await executeDirectUrl(recipe, originalBtn);
+    }
+  };
 
-      // Query minting API directly without loading ads!
-      const targetUrl = new URL(recipe.targetEndpointTemplate);
-      params.forEach((v, k) => targetUrl.searchParams.set(k, v));
+  originalBtn.parentNode.insertBefore(bypassBtn, originalBtn.nextSibling);
 
-      const res = await fetch(targetUrl.toString(), {
-        headers: { 'Referer': window.location.href }
-      });
-      const data = await res.json();
-      
-      // Trigger download
-      window.location.href = data.cdn_direct_url || targetUrl.toString();
-    };
-
-    originalBtn.parentNode?.insertBefore(fastBtn, originalBtn.nextSibling);
+  async function executeBackendApiMinting(recipe, btn) {
+    const payload = {};
+    for (const b of recipe.bindings) {
+      if (b.in === 'body') payload[b.param] = btn.dataset[b.attr] || '';
+    }
+    const res = await fetch(recipe.endpoint, {
+      method: recipe.method,
+      headers: recipe.headers,
+      body: JSON.stringify(payload),
+      credentials: 'include'
+    });
+    const data = await res.json();
+    window.location.href = data.download_url || data.url;
   }
 })();`}
 

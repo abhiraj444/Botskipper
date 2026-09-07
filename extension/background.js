@@ -4,8 +4,44 @@ let currentSession = null;
 
 // Initialize extension state
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('[DirectLink Engine] Extension installed successfully.');
+  console.log('[DirectLink Engine v2] Multi-Step & Backend API Resolver Extension installed.');
 });
+
+// Passively capture network requests during an active recording session
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (!currentSession) return;
+    // Don't capture image/media/style noise
+    if (['image', 'stylesheet', 'font', 'media'].includes(details.type)) return;
+
+    let bodyData = null;
+    if (details.requestBody && details.requestBody.raw) {
+      try {
+        const decoder = new TextDecoder('utf-8');
+        const rawText = details.requestBody.raw.map(b => b.bytes ? decoder.decode(b.bytes) : '').join('');
+        if (rawText.startsWith('{')) {
+          bodyData = JSON.parse(rawText);
+        } else {
+          bodyData = rawText;
+        }
+      } catch (e) {}
+    } else if (details.requestBody && details.requestBody.formData) {
+      bodyData = details.requestBody.formData;
+    }
+
+    currentSession.hops.push({
+      url: details.url,
+      method: details.method,
+      type: details.type,
+      requestBody: bodyData,
+      timestamp: Date.now()
+    });
+
+    console.log(`[DirectLink Network Sniffer] Captured ${details.method} ${details.url}`);
+  },
+  { urls: ['<all_urls>'] },
+  ['requestBody']
+);
 
 // Main message router
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -30,11 +66,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     try {
-      // Execute Relationship Solver
+      // Execute Upgraded Multi-Step & API Relationship Solver
       const recipe = RelationshipSolver.solve(
         currentSession.sourceDom,
         message.targetUrl,
-        message.targetBody
+        message.targetBody,
+        currentSession.hops
       );
 
       const domain = new URL(currentSession.sourceUrl).hostname;
@@ -42,7 +79,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       // Save recipe to chrome.storage.local
       chrome.storage.local.set({ [storageKey]: recipe }, () => {
-        console.log(`[DirectLink Engine] Synthesized and saved recipe for ${domain}:`, recipe);
+        console.log(`[DirectLink Engine] Synthesized and saved recipe (${recipe.strategy}) for ${domain}:`, recipe);
         sendResponse({ status: 'success', recipe, domain });
         currentSession = null; // Reset session
       });
@@ -59,7 +96,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       currentSession: currentSession ? {
         sourceUrl: currentSession.sourceUrl,
         domain: new URL(currentSession.sourceUrl).hostname,
-        durationSeconds: Math.floor((Date.now() - currentSession.startTime) / 1000)
+        durationSeconds: Math.floor((Date.now() - currentSession.startTime) / 1000),
+        capturedHopsCount: currentSession.hops.length
       } : null
     });
     return true;
